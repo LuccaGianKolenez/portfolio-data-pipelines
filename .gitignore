@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+*.log
+
+# Airflow
+airflow/logs/
+airflow/*.db
+airflow/.airflowenv
+
+# Parquet / dados locais
+data/
+.parquet/
+
+# dbt
+dbt/target/
+dbt/logs/
+
+# OS/IDE
+.DS_Store
+.vscode/
+.idea/
