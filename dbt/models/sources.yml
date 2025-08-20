@@ -1,0 +1,10 @@
+version: 2
+sources:
+  - name: public
+    schema: public
+    tables:
+      - name: weather_hourly
+        description: Raw hourly weather data loaded by Airflow
+        columns:
+          - name: time
+            tests: [not_null]

@@ -1,0 +1,17 @@
+name: "portfolio_dbt"
+version: "1.0.0"
+config-version: 2
+
+profile: "portfolio_dbt"
+
+model-paths: ["models"]
+target-path: "target"
+clean-targets: ["target"]
+
+models:
+  portfolio_dbt:
+    +materialized: view
+    staging:
+      +schema: stg
+    marts:
+      +schema: marts
