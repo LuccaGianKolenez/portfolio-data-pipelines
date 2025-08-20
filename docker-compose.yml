@@ -1,0 +1,150 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-portfolio_data}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":${MINIO_CONSOLE_PORT:-9001}"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio123}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  createbucket:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
+      mc mb -p local/$$MINIO_BUCKET || true;
+      mc policy set public local/$$MINIO_BUCKET;
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio123}
+      MINIO_BUCKET: ${MINIO_BUCKET:-portfolio-bucket}
+
+  airflow-init:
+    image: ${AIRFLOW_IMAGE:-apache/airflow:2.9.3}
+    entrypoint: /bin/bash
+    # instala deps (inclui psycopg2-binary) e MIGRA o banco do Airflow
+    command: -c "pip install --no-cache-dir ${_PIP_ADDITIONAL_REQUIREMENTS} && airflow db migrate && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR:-LocalExecutor}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-please_change_me_fernet_key}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_FERNET_KEY:-please_change_me_fernet_key}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS}
+      # usa driver psycopg2
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-portfolio_data}
+    user: "${AIRFLOW_UID:-50000}:0"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/include:/opt/airflow/include
+      - ./dbt:/opt/airflow/dbt
+
+  airflow-webserver:
+    image: ${AIRFLOW_IMAGE:-apache/airflow:2.9.3}
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      createbucket:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR:-LocalExecutor}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-please_change_me_fernet_key}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_FERNET_KEY:-please_change_me_fernet_key}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS}
+      # Conns/env para tasks
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-portfolio_data}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT_IN: 5432
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_BUCKET: ${MINIO_BUCKET:-portfolio-bucket}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minio123}
+      EXTERNAL_API_BASE: ${EXTERNAL_API_BASE:-https://api.exchangerate.host}
+      EXTERNAL_API_ENDPOINT: ${EXTERNAL_API_ENDPOINT:-/latest}
+      EXTERNAL_API_BASE_CURRENCY: ${EXTERNAL_API_BASE_CURRENCY:-USD}
+      # usa driver psycopg2
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-portfolio_data}
+      PYTHONPATH: /opt/airflow:/opt/airflow/dags:/opt/airflow/include
+    ports:
+      - "8080:8080"
+    command: webserver
+    user: "${AIRFLOW_UID:-50000}:0"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/include:/opt/airflow/include
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/data:/opt/airflow/data
+      - ./dbt:/opt/airflow/dbt
+
+  airflow-scheduler:
+    image: ${AIRFLOW_IMAGE:-apache/airflow:2.9.3}
+    depends_on:
+      airflow-webserver:
+        condition: service_started
+    environment:
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR:-LocalExecutor}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-please_change_me_fernet_key}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS}
+      # Same env para tasks
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-portfolio_data}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT_IN: 5432
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_BUCKET: ${MINIO_BUCKET:-portfolio-bucket}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minio123}
+      EXTERNAL_API_BASE: ${EXTERNAL_API_BASE:-https://api.exchangerate.host}
+      EXTERNAL_API_ENDPOINT: ${EXTERNAL_API_ENDPOINT:-/latest}
+      EXTERNAL_API_BASE_CURRENCY: ${EXTERNAL_API_BASE_CURRENCY:-USD}
+      # usa driver psycopg2
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-portfolio_data}
+    command: scheduler
+    user: "${AIRFLOW_UID:-50000}:0"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/include:/opt/airflow/include
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/data:/opt/airflow/data
+      - ./dbt:/opt/airflow/dbt
+
+volumes:
+  postgres_data:
+  minio_data:
